@@ -111,6 +111,11 @@ pub proof fn block_size_ge_word()
     ensures forall |p, block_id| is_block_ptr(p, block_id) ==>
         block_id.block_size >= size_of::<crate::linked_list::Node>()
 {
+    assert forall |p: *mut u8, block_id: BlockId| is_block_ptr(p, block_id) implies
+        block_id.block_size >= size_of::<crate::linked_list::Node>() by
+    {
+        reveal(is_block_ptr1);
+    };
 }
 
 #[verifier::spinoff_prover]
@@ -118,6 +123,52 @@ pub proof fn block_ptr_aligned_to_word()
     ensures forall |p, block_id| is_block_ptr(p, block_id) ==>
         p as int % align_of::<crate::linked_list::Node>() as int == 0
 {
+    assert forall |p: *mut u8, block_id: BlockId| is_block_ptr(p, block_id) implies
+        p as int % align_of::<crate::linked_list::Node>() as int == 0 by
+    {
+        reveal(is_block_ptr1);
+        const_facts();
+        let pid = block_id.page_id;
+        let sid = pid.segment_id;
+        let bs = block_id.block_size as int;
+        let idx = block_id.idx as int;
+        assert(p as int == block_start(block_id));
+        assert(block_start(block_id) == block_start_at(pid, bs, idx));
+        assert(block_start_at(pid, bs, idx) == page_start(pid) + start_offset(bs) + idx * bs);
+        assert(page_start(pid) == segment_start(sid) + SLICE_SIZE as int * pid.idx as int);
+        assert(segment_start(sid) == sid.id as int * SEGMENT_SIZE as int);
+        assert(SEGMENT_SIZE as int % 8 == 0) by (compute_only);
+        assert(segment_start(sid) % 8 == 0) by (nonlinear_arith)
+            requires sid.id as int >= 0, SEGMENT_SIZE as int % 8 == 0;
+        assert(SLICE_SIZE as int % 8 == 0) by (compute_only);
+        assert((SLICE_SIZE as int * pid.idx as int) % 8 == 0) by (nonlinear_arith)
+            requires SLICE_SIZE as int % 8 == 0;
+        assert(page_start(pid) % 8 == 0) by (nonlinear_arith)
+            requires segment_start(sid) % 8 == 0, (SLICE_SIZE as int * pid.idx as int) % 8 == 0,
+                page_start(pid) == segment_start(sid) + SLICE_SIZE as int * pid.idx as int;
+        assert(start_offset(bs) == 0 || start_offset(bs) == 3 * MAX_ALIGN_GUARANTEE as int);
+        assert(MAX_ALIGN_GUARANTEE as int % 8 == 0) by (compute_only);
+        assert(start_offset(bs) % 8 == 0) by {
+            if start_offset(bs) == 0 {
+                // 0 % 8 == 0
+            } else {
+                assert(start_offset(bs) == 3 * MAX_ALIGN_GUARANTEE as int);
+                assert(start_offset(bs) % 8 == 0) by (nonlinear_arith)
+                    requires start_offset(bs) == 3 * MAX_ALIGN_GUARANTEE as int,
+                        MAX_ALIGN_GUARANTEE as int % 8 == 0;
+            }
+        };
+        assert(size_of::<crate::linked_list::Node>() == 8);
+        assert(bs % 8 == 0) by (nonlinear_arith)
+            requires bs % size_of::<crate::linked_list::Node>() as int == 0,
+                size_of::<crate::linked_list::Node>() as int == 8;
+        assert((idx * bs) % 8 == 0) by (nonlinear_arith)
+            requires bs % 8 == 0, 0 <= idx;
+        assert(block_start(block_id) % 8 == 0) by (nonlinear_arith)
+            requires page_start(pid) % 8 == 0, start_offset(bs) % 8 == 0, (idx * bs) % 8 == 0,
+                block_start(block_id) == page_start(pid) + start_offset(bs) + idx * bs;
+        assert(align_of::<crate::linked_list::Node>() == 8);
+    };
 }
 
 pub proof fn block_start_at_diff(page_id: PageId, block_size: nat,
@@ -125,6 +176,13 @@ pub proof fn block_start_at_diff(page_id: PageId, block_size: nat,
     ensures block_start_at(page_id, block_size as int, block_idx2 as int) ==
         block_start_at(page_id, block_size as int, block_idx1 as int) + (block_idx2 - block_idx1) * block_size
 {
+    assert(block_start_at(page_id, block_size as int, block_idx2 as int) ==
+        block_start_at(page_id, block_size as int, block_idx1 as int) + (block_idx2 - block_idx1) * block_size)
+        by (nonlinear_arith)
+        requires block_start_at(page_id, block_size as int, block_idx2 as int) ==
+            page_start(page_id) + start_offset(block_size as int) + block_idx2 as int * block_size as int,
+            block_start_at(page_id, block_size as int, block_idx1 as int) ==
+            page_start(page_id) + start_offset(block_size as int) + block_idx1 as int * block_size as int;
 }
 
 // Bit lemmas
@@ -322,6 +380,17 @@ pub fn calculate_page_block_at(
         p == block_start_at(page_id, block_size as int, idx as int),
         p == page_start + idx as int * block_size as int
 {
+    proof {
+        // block_start_at(., idx) == page_start_param + idx * block_size
+        let bs: int = block_size as int;
+        let i: int = idx as int;
+        let ps: int = page_start as int;
+        assert(block_start_at(page_id, bs, i) == ps + i * bs) by (nonlinear_arith)
+            requires block_start_at(page_id, bs, i) == block_start_at(page_id, bs, 0) + i * bs,
+                ps == block_start_at(page_id, bs, 0);
+        // No overflow for page_start + block_size * idx (from precondition bounds)
+        // ps + i*bs <= seg_start + SEGMENT_SIZE < usize::MAX
+    }
     let p = page_start + block_size * idx;
     return p;
 }
@@ -377,6 +446,30 @@ proof fn bitand_with_mask_gives_rounding(x: usize, y: usize)
     ensures x & !sub(y, 1) == (x / y) * y,
     decreases y,
 {
+    let mask = sub(y, 1usize);
+    let lo: usize = x & mask;
+    let hi: usize = x & !mask;
+    // Bits of x partition into hi (upper) and lo (lower)
+    assert(hi + lo == x) by (bit_vector)
+        requires hi == x & !mask, lo == x & mask;
+    // lo < y (lower masked bits are strictly less than y, a power of 2)
+    assert(lo < y) by (bit_vector)
+        requires y != 0usize, y & sub(y, 1usize) == 0usize, lo == x & sub(y, 1usize);
+    // hi has all lower bits zero (hi & mask == 0, since (x & !mask) & mask == 0)
+    assert(hi & sub(y, 1usize) == 0) by (bit_vector)
+        requires hi == x & !sub(y, 1usize);
+    // hi is divisible by y: y is power-of-2 and hi has zero lower bits => hi % y == 0
+    assert(hi % y == 0) by (bit_vector)
+        requires y != 0usize, y & sub(y, 1usize) == 0usize, hi & sub(y, 1usize) == 0usize;
+    // By the division algorithm: x = hi + lo, 0 <= lo < y, y | hi  =>  (x/y)*y = hi
+    let xi: int = x as int;
+    let yi: int = y as int;
+    let loi: int = lo as int;
+    let hii: int = hi as int;
+    assert(hii == (xi / yi) * yi) by (nonlinear_arith)
+        requires hii + loi == xi, loi < yi, hii % yi == 0, 0 < yi, 0 <= loi, 0 <= hii;
+    assert((x / y) * y == hi) by (nonlinear_arith)
+        requires hii == xi / yi * yi, xi == x as int, yi == y as int, hii == hi as int, 0 < yi;
 }
 
 #[verifier::spinoff_prover]
@@ -384,6 +477,7 @@ proof fn two_mul_with_bit0(x1: int, y1: int)
     requires y1 != 0,
     ensures (2 * x1) / (2 * y1) == x1 / y1
 {
+    assert((2 * x1) / (2 * y1) == x1 / y1) by (nonlinear_arith) requires y1 != 0;
 }
 
 #[verifier::spinoff_prover]
@@ -391,6 +485,7 @@ proof fn two_mul_with_bit1(x1: int, y1: int)
     requires y1 != 0,
     ensures (2 * x1 + 1) / (2 * y1) == x1 / y1
 {
+    assert((2 * x1 + 1) / (2 * y1) == x1 / y1) by (nonlinear_arith) requires y1 != 0;
 }
 
 
@@ -408,9 +503,44 @@ pub fn align_down(x: usize, y: usize) -> (res: usize)
 
     if ((y & mask) == 0) { // power of two?
         let res = x & !mask;
+        proof {
+            bitand_with_mask_gives_rounding(x, y);
+            let xi: int = x as int;
+            let yi: int = y as int;
+            let ri: int = res as int;
+            assert(mask == sub(y, 1usize));
+            assert(res == (x / y) * y);  // from bitand ensures
+            assert(ri == xi / yi * yi) by (nonlinear_arith)
+                requires res == (x / y) * y, ri == res as int, xi == x as int, yi == y as int, 0 < yi;
+            assert(ri <= xi) by (nonlinear_arith) requires ri == xi / yi * yi, 0 < yi, 0 <= xi;
+            assert(xi < ri + yi) by (nonlinear_arith) requires ri == xi / yi * yi, 0 < yi, 0 <= xi;
+            assert(ri % yi == 0) by (nonlinear_arith) requires ri == xi / yi * yi, 0 < yi;
+            assert(ri / yi * yi == ri) by (nonlinear_arith) requires ri % yi == 0, 0 < yi;
+        }
         res
     } else {
+        // Prove no overflow before computation: (x/y)*y <= x <= usize::MAX
+        proof {
+            assert(0 < y as int) by (nonlinear_arith) requires y != 0;
+            assert((x / y) * y <= x) by (nonlinear_arith) requires 0 < y as int, x as int >= 0;
+        }
         let res = (x / y) * y;
+        proof {
+            let xi: int = x as int;
+            let yi: int = y as int;
+            let ri: int = res as int;
+            assert(0 < yi) by (nonlinear_arith) requires y != 0, yi == y as int, 0 <= yi;
+            assert(res == (x / y) * y);
+            assert((x / y) as int <= xi / yi) by (nonlinear_arith) requires 0 < yi, xi == x as int, yi == y as int;
+            assert((x / y) * y <= x) by (nonlinear_arith)
+                requires (x / y) as int <= xi / yi, 0 < yi, xi == x as int, yi == y as int;
+            assert(ri == xi / yi * yi) by (nonlinear_arith)
+                requires res == (x / y) * y, ri == res as int, xi == x as int, yi == y as int, 0 < yi;
+            assert(ri <= xi) by (nonlinear_arith) requires ri == xi / yi * yi, 0 < yi, 0 <= xi;
+            assert(xi < ri + yi) by (nonlinear_arith) requires ri == xi / yi * yi, 0 < yi, 0 <= xi;
+            assert(ri % yi == 0) by (nonlinear_arith) requires ri == xi / yi * yi, 0 < yi;
+            assert(ri / yi * yi == ri) by (nonlinear_arith) requires ri % yi == 0, 0 < yi;
+        }
         res
     }
 }
@@ -428,10 +558,60 @@ pub fn align_up(x: usize, y: usize) -> (res: usize)
     let mask = y - 1;
 
     if ((y & mask) == 0) { // power of two?
-        let res = (x + mask) & !mask;
+        let xm: usize = x + mask;
+        let res = xm & !mask;
+        proof {
+            bitand_with_mask_gives_rounding(xm, y);
+            let xi: int = x as int;
+            let yi: int = y as int;
+            let ri: int = res as int;
+            let xmi: int = xm as int;
+            assert(mask == sub(y, 1usize));
+            assert(res == (xm / y) * y);  // from bitand ensures
+            assert(xmi == xi + yi - 1) by (nonlinear_arith)
+                requires xm == x + mask, mask as int == y as int - 1, xi == x as int, yi == y as int, xmi == xm as int;
+            assert(ri == xmi / yi * yi) by (nonlinear_arith)
+                requires res == (xm / y) * y, ri == res as int, xmi == xm as int, yi == y as int, 0 < yi;
+            assert(ri == (xi + yi - 1) / yi * yi) by (nonlinear_arith)
+                requires ri == xmi / yi * yi, xmi == xi + yi - 1;
+            assert(xi <= ri) by (nonlinear_arith) requires ri == xmi / yi * yi, xmi == xi + yi - 1, 0 < yi, 0 <= xi;
+            assert(ri <= xi + yi - 1) by (nonlinear_arith) requires ri == xmi / yi * yi, xmi == xi + yi - 1, 0 < yi;
+            assert(ri % yi == 0) by (nonlinear_arith) requires ri == xmi / yi * yi, 0 < yi;
+            assert(ri / yi * yi == ri) by (nonlinear_arith) requires ri % yi == 0, 0 < yi;
+        }
         res
     } else {
-        let res = ((x + mask) / y) * y;
+        let xm: usize = x + mask;
+        // Prove no overflow before computation: (xm / y) * y <= xm <= usize::MAX
+        proof {
+            assert(0 < y as int) by (nonlinear_arith) requires y != 0;
+            assert((xm / y) * y <= xm) by (nonlinear_arith) requires 0 < y as int, xm as int >= 0;
+        }
+        let res = (xm / y) * y;
+        proof {
+            let xi: int = x as int;
+            let yi: int = y as int;
+            let ri: int = res as int;
+            let xmi: int = xm as int;
+            assert(yi > 0);
+            assert(xmi == xi + yi - 1) by (nonlinear_arith)
+                requires xm == x + mask, mask as int == y as int - 1, xi == x as int, yi == y as int, xmi == xm as int;
+            assert(ri == xmi / yi * yi) by (nonlinear_arith)
+                requires res == (xm / y) * y, ri == res as int, xmi == xm as int, yi == y as int, 0 < yi;
+            assert(xmi / yi * yi <= xmi) by (nonlinear_arith)
+                requires 0 < yi, 0 <= xmi;
+            assert(xi <= ri) by (nonlinear_arith)
+                requires ri == xmi / yi * yi, xmi == xi + yi - 1, 0 < yi, 0 <= xi;
+            assert(ri <= xi + yi - 1) by (nonlinear_arith)
+                requires ri == xmi / yi * yi, xmi == xi + yi - 1, 0 < yi;
+            let q: int = xmi / yi;
+            assert(ri == q * yi);
+            assert(ri % yi == 0) by (nonlinear_arith) requires ri == q * yi, yi > 0;
+            assert(ri / yi * yi == ri) by (nonlinear_arith) requires ri % yi == 0, yi > 0;
+            // no overflow: res <= xm <= usize::MAX
+            assert((xm / y) * y <= xm) by (nonlinear_arith)
+                requires 0 < yi, 0 <= xmi == xm as int, yi == y as int;
+        }
         res
     }
 }
@@ -492,16 +672,74 @@ pub proof fn is_block_ptr_mult4(ptr: *mut u8, block_id: BlockId)
     requires is_block_ptr(ptr, block_id),
     ensures ptr as int % 4 == 0,
 {
+    reveal(is_block_ptr1);
+    const_facts();
+    let pid = block_id.page_id;
+    let sid = pid.segment_id;
+    let bs = block_id.block_size as int;
+    let idx = block_id.idx as int;
+    let si: int = sid.id as int;
+    assert(ptr as int == block_start(block_id));
+    assert(block_start(block_id) == block_start_at(pid, bs, idx));
+    assert(block_start_at(pid, bs, idx) == page_start(pid) + start_offset(bs) + idx * bs);
+    assert(page_start(pid) == segment_start(sid) + SLICE_SIZE as int * pid.idx as int);
+    assert(segment_start(sid) == si * SEGMENT_SIZE as int);
+    assert(SEGMENT_SIZE as int % 4 == 0) by (compute_only);
+    assert(si * SEGMENT_SIZE as int % 4 == 0) by (nonlinear_arith)
+        requires SEGMENT_SIZE as int % 4 == 0, si >= 0;
+    assert(SLICE_SIZE as int % 4 == 0) by (compute_only);
+    assert(SLICE_SIZE as int * pid.idx as int % 4 == 0) by (nonlinear_arith)
+        requires SLICE_SIZE as int % 4 == 0, pid.idx as int >= 0;
+    assert(page_start(pid) % 4 == 0) by (nonlinear_arith)
+        requires si * SEGMENT_SIZE as int % 4 == 0,
+            SLICE_SIZE as int * pid.idx as int % 4 == 0,
+            page_start(pid) == segment_start(sid) + SLICE_SIZE as int * pid.idx as int,
+            segment_start(sid) == si * SEGMENT_SIZE as int;
+    assert(start_offset(bs) == 0 || start_offset(bs) == 3 * MAX_ALIGN_GUARANTEE as int);
+    assert(MAX_ALIGN_GUARANTEE as int % 4 == 0) by (compute_only);
+    assert(start_offset(bs) % 4 == 0) by {
+        if start_offset(bs) == 0 { }
+        else {
+            assert(start_offset(bs) == 3 * MAX_ALIGN_GUARANTEE as int);
+            assert(start_offset(bs) % 4 == 0) by (nonlinear_arith)
+                requires start_offset(bs) == 3 * MAX_ALIGN_GUARANTEE as int,
+                    MAX_ALIGN_GUARANTEE as int % 4 == 0;
+        }
+    };
+    assert(size_of::<crate::linked_list::Node>() == 8);
+    assert(bs % 4 == 0) by (nonlinear_arith)
+        requires bs % size_of::<crate::linked_list::Node>() as int == 0,
+            size_of::<crate::linked_list::Node>() as int == 8;
+    assert(idx * bs % 4 == 0) by (nonlinear_arith)
+        requires bs % 4 == 0, 0 <= idx;
+    assert(ptr as int % 4 == 0) by (nonlinear_arith)
+        requires page_start(pid) % 4 == 0, start_offset(bs) % 4 == 0, idx * bs % 4 == 0,
+            ptr as int == page_start(pid) + start_offset(bs) + idx * bs;
 }
 
 pub proof fn segment_start_mult_commit_size(segment_id: SegmentId)
     ensures segment_start(segment_id) % COMMIT_SIZE as int == 0,
 {
+    const_facts();
+    assert(COMMIT_SIZE == SLICE_SIZE);
+    assert(SLICE_SIZE == 65536) by (compute_only);
+    assert(segment_start(segment_id) == segment_id.id as int * SEGMENT_SIZE as int);
+    assert(SEGMENT_SIZE as int % COMMIT_SIZE as int == 0) by (compute_only);
+    let si: int = segment_id.id as int;
+    let ss: int = segment_start(segment_id);
+    assert(ss % COMMIT_SIZE as int == 0) by (nonlinear_arith)
+        requires SEGMENT_SIZE as int % COMMIT_SIZE as int == 0, COMMIT_SIZE as int > 0,
+            ss == si * SEGMENT_SIZE as int;
 }
 
 pub proof fn segment_start_mult8(segment_id: SegmentId)
     ensures segment_start(segment_id) % 8 == 0,
 {
+    assert(segment_start(segment_id) == segment_id.id as int * SEGMENT_SIZE as int);
+    assert(SEGMENT_SIZE as int % 8 == 0) by (compute_only);
+    assert(segment_start(segment_id) % 8 == 0) by (nonlinear_arith)
+        requires segment_id.id as int >= 0, SEGMENT_SIZE as int % 8 == 0,
+            segment_start(segment_id) == segment_id.id as int * SEGMENT_SIZE as int;
 }
 
 pub proof fn segment_start_ge0(segment_id: SegmentId)
@@ -536,6 +774,7 @@ pub proof fn get_block_start_from_is_block_ptr(ptr: *mut u8, block_id: BlockId)
     requires is_block_ptr(ptr, block_id),
     ensures ptr as int == block_start(block_id),
 {
+    reveal(is_block_ptr1);
 }
 
 pub proof fn get_block_start_defn(block_id: BlockId)
@@ -547,6 +786,7 @@ pub proof fn get_block_start_defn(block_id: BlockId)
 pub proof fn sub_distribute(a: int, b: int, c: int)
     ensures a * c - b * c == (a - b) * c,
 {
+    assert(a * c - b * c == (a - b) * c) by (nonlinear_arith);
 }
 
 }

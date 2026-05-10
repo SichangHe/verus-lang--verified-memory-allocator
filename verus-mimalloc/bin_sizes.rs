@@ -160,6 +160,62 @@ proof fn mod8(x:int, y:int) by (nonlinear_arith)
 pub proof fn size_of_bin_mult_word_size(bin_idx: int)
     ensures size_of_bin(bin_idx) % 8 == 0
 {
+    reveal(size_of_bin);
+    assert(usize::BITS == 64) by (compute_only);
+    assert(BIN_HUGE == 73) by (compute_only);
+    if 1 <= bin_idx <= 8 {
+        let si: nat = size_of_bin(bin_idx);
+        // si = 8 * bin_idx
+        assert(si == 8nat * bin_idx as nat) by (nonlinear_arith);
+        assert(si % 8 == 0) by (nonlinear_arith);
+    } else if bin_idx == BIN_HUGE as int {
+        let si: nat = size_of_bin(bin_idx);
+        // si = 8 * (524288 + 1) = 8 * 524289
+        let y: int = 524289;
+        assert(si as int == 8 * y) by (nonlinear_arith);
+        assert(si % 8 == 0) by (nonlinear_arith);
+    } else {
+        let group = (bin_idx - 9) / 4;
+        let inner = (bin_idx - 9) % 4;
+        pow2_positive(group + 1);
+        let pv: nat = pow2(group + 1);
+        let si: nat = size_of_bin(bin_idx);
+        // si = 8 * (inner + 5) * pv
+        assert(si as int == 8 * (inner + 5) * pv as int) by (nonlinear_arith);
+        assert(si % 8 == 0) by (nonlinear_arith);
+    }
+}
+
+// Compute-friendly version of smallest_bin_fitting_size (uses non-opaque u64_leading_zeros).
+// u64_leading_zeros_for_compute is defined after log2 below.
+spec fn smallest_bin_fitting_size_compute(size: int) -> int {
+    let wsize = (size + 7) / 8;
+    if wsize <= 1 {
+        1
+    } else if wsize <= 8 {
+        wsize
+    } else if wsize > 524288 {
+        BIN_HUGE as int
+    } else {
+        let w = (wsize - 1) as u64;
+        let lz = u64_leading_zeros_for_compute(w);
+        let b = (63 - lz) as u8;
+        let shifted = (w >> (b as u64 - 2) as u64) as u8;
+        let bin_idx = ((b * 4u8) + (shifted & 0x03u8)) - 3;
+        bin_idx
+    }
+}
+
+proof fn smallest_bin_fitting_size_compute_correct_bin(size: int)
+    ensures smallest_bin_fitting_size_compute(size) == smallest_bin_fitting_size(size),
+{
+    if (size + 7) / 8 > 8 && (size + 7) / 8 <= 524288 {
+        let wsize = (size + 7) / 8;
+        let w = (wsize - 1) as u64;
+        u64_leading_zeros_for_compute_correct(w);
+        assert(usize::BITS == 64u32) by (compute_only);
+        assert((usize::BITS / 8) as int == 8) by (compute_only);
+    }
 }
 
 // spec equivalent of bin
@@ -356,10 +412,10 @@ pub proof fn lemma_bin_sizes_constants()
 spec fn property_idx_out_of_range_has_different_bin_size(bin_idx: int, wsize:int) -> bool
 {
     valid_bin_idx(bin_idx) &&
-    !(pfd_lower(bin_idx) <= wsize <= pfd_upper(bin_idx)) && 
-    0 <= wsize <= 128 
-    ==> 
-    smallest_bin_fitting_size(wsize * INTPTR_SIZE) != bin_idx
+    !(pfd_lower(bin_idx) <= wsize <= pfd_upper(bin_idx)) &&
+    0 <= wsize <= 128
+    ==>
+    smallest_bin_fitting_size_compute(wsize * INTPTR_SIZE) != bin_idx
 }
 
 spec fn check_idx_out_of_range_has_different_bin_size(bin_idx: int, wsize_start:int, wsize_end:int) -> bool
@@ -380,7 +436,9 @@ proof fn result_idx_out_of_range_has_different_bin_size(bin_idx: int, wsize_star
                  property_idx_out_of_range_has_different_bin_size(bin_idx, wsize)),
     decreases wsize_end - wsize_start,
 {
-
+    if wsize_start < wsize_end {
+        result_idx_out_of_range_has_different_bin_size(bin_idx, wsize_start + 1, wsize_end);
+    }
 }
 
 spec fn check2_idx_out_of_range_has_different_bin_size(bin_idx_start: int, bin_idx_end: int, wsize_start:int, wsize_end:int) -> bool
@@ -401,7 +459,10 @@ proof fn result2_idx_out_of_range_has_different_bin_size(bin_idx_start: int, bin
                      property_idx_out_of_range_has_different_bin_size(bin_idx, wsize)),
     decreases bin_idx_end - bin_idx_start,
 {
-
+    if bin_idx_start < bin_idx_end {
+        result2_idx_out_of_range_has_different_bin_size(bin_idx_start + 1, bin_idx_end, wsize_start, wsize_end);
+        result_idx_out_of_range_has_different_bin_size(bin_idx_start, wsize_start, wsize_end);
+    }
 }
 
 pub proof fn different_bin_size(bin_idx1: int, bin_idx2: int)
@@ -412,16 +473,73 @@ pub proof fn different_bin_size(bin_idx1: int, bin_idx2: int)
     ensures
         size_of_bin(bin_idx1) != size_of_bin(bin_idx2)
 {
+    lemma_bin_sizes_constants();
 }
 
 pub proof fn idx_out_of_range_has_different_bin_size(bin_idx: int, wsize: int)
-    requires 
+    requires
         valid_bin_idx(bin_idx),
         !(pfd_lower(bin_idx) <= wsize <= pfd_upper(bin_idx)),
         0 <= wsize <= 128,
     ensures
         smallest_bin_fitting_size(wsize * INTPTR_SIZE) != bin_idx
 {
+    // Split by bin_idx ranges to avoid compute_only step-limit
+    assert(check2_idx_out_of_range_has_different_bin_size(1, 6, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(1, 6, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(6, 11, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(6, 11, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(11, 16, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(11, 16, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(16, 21, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(16, 21, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(21, 26, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(21, 26, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(26, 31, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(26, 31, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(31, 36, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(31, 36, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(36, 41, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(36, 41, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(41, 46, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(41, 46, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(46, 51, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(46, 51, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(51, 56, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(51, 56, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(56, 61, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(56, 61, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(61, 66, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(61, 66, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(66, 71, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(66, 71, 65, 129)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(71, 74, 0, 65)) by (compute_only);
+    assert(check2_idx_out_of_range_has_different_bin_size(71, 74, 65, 129)) by (compute_only);
+    result2_idx_out_of_range_has_different_bin_size(1, 6, 0, 129);
+    result2_idx_out_of_range_has_different_bin_size(6, 11, 0, 129);
+    result2_idx_out_of_range_has_different_bin_size(11, 16, 0, 129);
+    result2_idx_out_of_range_has_different_bin_size(16, 21, 0, 129);
+    result2_idx_out_of_range_has_different_bin_size(21, 26, 0, 129);
+    result2_idx_out_of_range_has_different_bin_size(26, 31, 0, 129);
+    result2_idx_out_of_range_has_different_bin_size(31, 36, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(31, 36, 65, 129);
+    result2_idx_out_of_range_has_different_bin_size(36, 41, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(36, 41, 65, 129);
+    result2_idx_out_of_range_has_different_bin_size(41, 46, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(41, 46, 65, 129);
+    result2_idx_out_of_range_has_different_bin_size(46, 51, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(46, 51, 65, 129);
+    result2_idx_out_of_range_has_different_bin_size(51, 56, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(51, 56, 65, 129);
+    result2_idx_out_of_range_has_different_bin_size(56, 61, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(56, 61, 65, 129);
+    result2_idx_out_of_range_has_different_bin_size(61, 66, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(61, 66, 65, 129);
+    result2_idx_out_of_range_has_different_bin_size(66, 71, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(66, 71, 65, 129);
+    result2_idx_out_of_range_has_different_bin_size(71, 74, 0, 65);
+    result2_idx_out_of_range_has_different_bin_size(71, 74, 65, 129);
+    smallest_bin_fitting_size_compute_correct_bin(wsize * INTPTR_SIZE);
 }
 
 /********************************************************
@@ -464,22 +582,53 @@ proof fn pow2_positive(e:int)
     ensures pow2(e) > 0,
     decreases e,
 {
+    if e <= 0 {
+        // pow2(e) = 1 > 0
+    } else {
+        pow2_positive(e - 1);
+        // pow2(e) = pow2(e-1) * 2 > 0
+        assert(pow2(e) == pow2(e - 1) * 2);
+        assert(pow2(e) > 0) by (nonlinear_arith) requires pow2(e - 1) > 0, pow2(e) == pow2(e-1) * 2;
+    }
 }
 
 proof fn pow2_adds(e1:nat, e2:nat)
-    ensures 
+    ensures
         pow2(e1 as int) * pow2(e2 as int) == pow2((e1 + e2) as int),
-    decreases e1,        
+    decreases e1,
 {
+    if e1 == 0 {
+        // pow2(0) = 1, 1 * pow2(e2) = pow2(e2) = pow2(0 + e2)
+        assert(pow2(0) == 1);
+    } else {
+        pow2_adds((e1 - 1) as nat, e2);
+        // pow2(e1-1) * pow2(e2) == pow2(e1-1+e2)
+        // pow2(e1) = pow2(e1-1) * 2
+        // pow2(e1) * pow2(e2) = pow2(e1-1) * 2 * pow2(e2) = 2 * pow2(e1-1+e2) = pow2(e1+e2)
+        let e1i: int = e1 as int;
+        assert(pow2(e1i) == pow2(e1i - 1) * 2);
+        assert(pow2(e1i) * pow2(e2 as int) == pow2((e1 + e2) as int)) by (nonlinear_arith)
+            requires pow2(e1i - 1) * pow2(e2 as int) == pow2((e1 - 1 + e2) as int),
+                pow2(e1i) == pow2(e1i - 1) * 2,
+                pow2((e1 + e2) as int) == pow2((e1 - 1 + e2) as int) * 2;
+    }
 }
 
 proof fn pow2_subtracts(e1:nat, e2:nat)
     requires e1 <= e2,
-    ensures 
+    ensures
         pow2(e2 as int) / pow2(e1 as int) == pow2((e2 - e1) as int),
 {
+    // From pow2_adds: pow2(e1) * pow2(e2-e1) = pow2(e2)
+    // So pow2(e2) / pow2(e1) = pow2(e2-e1)
+    pow2_adds(e1, (e2 - e1) as nat);
+    assert(pow2(e1 as int) * pow2((e2 - e1) as int) == pow2(e2 as int));
+    pow2_positive(e1 as int);
+    assert(pow2(e2 as int) / pow2(e1 as int) == pow2((e2 - e1) as int)) by (nonlinear_arith)
+        requires pow2(e1 as int) * pow2((e2 - e1) as int) == pow2(e2 as int),
+            pow2(e1 as int) > 0;
 }
-        
+
 proof fn pow2_properties()
     ensures
         forall |e:int| pow2(e) > 0,
@@ -488,6 +637,35 @@ proof fn pow2_properties()
         forall |e1, e2| 0 <= e1 && 0 <= e2 ==> pow2(e1) * pow2(e2) == #[trigger] pow2(e1 + e2),
         forall |e1, e2| 0 <= e1 <= e2 ==> pow2(e2) / pow2(e1) == #[trigger] pow2(e2 - e1),
 {
+    assert forall |e:int| pow2(e) > 0 by { pow2_positive(e); };
+    assert forall |e:int| e > 0 implies #[trigger] pow2(e) / 2 == pow2(e - 1) by {
+        assert(pow2(e) == pow2(e - 1) * 2);
+        pow2_positive(e - 1);
+        assert(pow2(e) / 2 == pow2(e - 1)) by (nonlinear_arith)
+            requires pow2(e) == pow2(e - 1) * 2, pow2(e - 1) > 0;
+    };
+    assert forall |e1: int, e2: int| 0 <= e1 < e2 implies #[trigger] pow2(e1) < #[trigger] pow2(e2) by {
+        // pow2 is strictly increasing
+        // pow2(e2) = pow2(e1) * pow2(e2-e1)
+        pow2_adds(e1 as nat, (e2 - e1) as nat);
+        pow2_positive(e2 - e1);
+        pow2_positive(e1);
+        assert(pow2(e2) == pow2(e1) * pow2(e2 - e1));
+        assert(pow2(e2 - e1) >= 2) by {
+            assert(e2 - e1 >= 1);
+            assert(pow2(e2 - e1) == pow2(e2 - e1 - 1) * 2);
+            pow2_positive(e2 - e1 - 1);
+        };
+        assert(pow2(e2) > pow2(e1)) by (nonlinear_arith)
+            requires pow2(e2) == pow2(e1) * pow2(e2 - e1),
+                pow2(e2 - e1) >= 2, pow2(e1) > 0;
+    };
+    assert forall |e1: int, e2: int| 0 <= e1 && 0 <= e2 implies pow2(e1) * pow2(e2) == #[trigger] pow2(e1 + e2) by {
+        pow2_adds(e1 as nat, e2 as nat);
+    };
+    assert forall |e1: int, e2: int| 0 <= e1 <= e2 implies pow2(e2) / pow2(e1) == #[trigger] pow2(e2 - e1) by {
+        pow2_subtracts(e1 as nat, e2 as nat);
+    };
 }
 
 proof fn shift_is_div(x:u64, shift:u64)
@@ -495,6 +673,33 @@ proof fn shift_is_div(x:u64, shift:u64)
     ensures x >> shift == x as nat / pow2(shift as int),
     decreases shift,
 {
+    if shift == 0 {
+        assert(x >> 0u64 == x) by (bit_vector);
+        assert(pow2(0) == 1);
+        assert(x as nat / 1 == x as nat) by (nonlinear_arith);
+    } else {
+        // x >> shift = (x >> 1) >> (shift - 1)
+        // By induction: (x >> 1) >> (shift - 1) = (x/2) / pow2(shift-1) = x / (2 * pow2(shift-1)) = x / pow2(shift)
+        let shift1 = sub(shift, 1u64);
+        shift_is_div(x >> 1u64, shift1);
+        // (x >> 1) >> shift1 = (x >> 1) as nat / pow2(shift1 as int)
+        assert(x >> shift == (x >> 1u64) >> shift1) by (bit_vector)
+            requires shift >= 1, shift1 == sub(shift, 1u64);
+        assert((x >> 1u64) as nat == x as nat / 2) by {
+            assert(x >> 1u64 == x as nat / pow2(1)) by {
+                shift_is_div(x, 1u64);
+            }
+            assert(pow2(1) == 2);
+        }
+        // x >> shift = (x/2) / pow2(shift-1) = x / (2 * pow2(shift-1)) = x / pow2(shift)
+        pow2_adds(1nat, shift1 as nat);
+        assert(pow2(1) == 2);
+        assert(pow2(shift as int) == 2 * pow2(shift1 as int)) by (nonlinear_arith)
+            requires pow2(1) * pow2(shift1 as int) == pow2(1 + shift1 as int),
+                shift1 == sub(shift, 1u64), pow2(1) == 2;
+        assert(x as nat / pow2(shift as int) == (x as nat / 2) / pow2(shift1 as int)) by (nonlinear_arith)
+            requires pow2(shift as int) == 2 * pow2(shift1 as int), pow2(shift1 as int) > 0;
+    }
 }
 
 /********************************************************
@@ -509,6 +714,33 @@ proof fn leading_zeros_powers_of_2(i: u64, exp: nat)
         u64_leading_zeros(i) == 64 - exp - 1,
     decreases i,
 {
+    if exp == 0 {
+        // i = pow2(0) = 1
+        assert(pow2(0) == 1);
+        // u64_leading_zeros(1) = u64_leading_zeros(1/2) - 1 = u64_leading_zeros(0) - 1 = 64 - 1 = 63
+        assert(u64_leading_zeros(1u64) == u64_leading_zeros(0u64) - 1);
+        assert(u64_leading_zeros(0u64) == 64);
+    } else {
+        // i = pow2(exp) = 2 * pow2(exp-1)
+        let exp1 = (exp - 1) as nat;
+        pow2_adds(1nat, exp1);
+        assert(pow2(1) == 2);
+        assert(i as int == 2 * pow2(exp1 as int)) by (nonlinear_arith)
+            requires pow2(exp as int) == 2 * pow2(exp1 as int);
+        assert(i / 2 == pow2(exp1 as int) as u64) by (nonlinear_arith)
+            requires i as int == 2 * pow2(exp1 as int);
+        // By induction: u64_leading_zeros(i/2) == 64 - exp1 - 1
+        leading_zeros_powers_of_2(i / 2, exp1);
+        // u64_leading_zeros(i) = u64_leading_zeros(i/2) - 1 = (64 - exp1 - 1) - 1 = 64 - exp - 1
+        assert(u64_leading_zeros(i) == u64_leading_zeros(i / 2) - 1) by {
+            assert(i != 0u64) by (nonlinear_arith) requires i as int == 2 * pow2(exp1 as int), pow2(exp1 as int) > 0;
+        };
+        assert(u64_leading_zeros(i / 2) == 64 - exp1 as int - 1);
+        assert(u64_leading_zeros(i) == 64 - exp as int - 1) by (nonlinear_arith)
+            requires u64_leading_zeros(i) == u64_leading_zeros(i / 2) - 1,
+                u64_leading_zeros(i / 2) == 64 - exp1 as int - 1,
+                exp1 == exp - 1;
+    }
 }
 
 proof fn leading_zeros_between_powers_of_2(i: u64, exp: nat)
@@ -518,7 +750,40 @@ proof fn leading_zeros_between_powers_of_2(i: u64, exp: nat)
     ensures
         u64_leading_zeros(i) == 64 - exp - 1,
     decreases exp,
-{   
+{
+    let ei: int = exp as int;
+    let pe: nat = pow2(ei);
+    let pe1: nat = pow2(ei + 1);
+    let exp1 = (exp - 1) as nat;
+    let ei1: int = exp1 as int;
+    let pe_1: nat = pow2(ei1);
+    pow2_positive(ei);
+    assert(i != 0u64) by (nonlinear_arith) requires pe > 0, pe <= i as int;
+    assert(u64_leading_zeros(i) == u64_leading_zeros(i / 2) - 1);
+    pow2_adds(1nat, exp1);
+    assert(pow2(1) == 2);
+    assert(pe == 2 * pe_1) by (nonlinear_arith)
+        requires pow2(1) * pe_1 == pow2(1 + ei1), pow2(1) == 2;
+    pow2_adds(1nat, exp);
+    assert(pe1 == 2 * pe) by (nonlinear_arith)
+        requires pow2(1) * pe == pow2(1 + ei), pow2(1) == 2;
+    assert(pe_1 <= (i / 2) as int) by (nonlinear_arith) requires pe == 2 * pe_1, pe <= i as int;
+    assert(pe > (i / 2) as int) by (nonlinear_arith) requires pe1 == 2 * pe, pe1 > i as int;
+    if exp == 1 {
+        assert(pe_1 == 1);
+        assert(pe == 2);
+        assert(i / 2 == 1u64) by (nonlinear_arith)
+            requires pe_1 as u64 <= i / 2, pe > (i / 2) as int;
+        leading_zeros_powers_of_2(i / 2, exp1);
+    } else {
+        assert(exp1 >= 1);
+        leading_zeros_between_powers_of_2(i / 2, exp1);
+    }
+    assert(u64_leading_zeros(i / 2) == 64 - ei1 - 1);
+    assert(u64_leading_zeros(i) == 64 - ei - 1) by (nonlinear_arith)
+        requires u64_leading_zeros(i) == u64_leading_zeros(i / 2) - 1,
+            u64_leading_zeros(i / 2) == 64 - ei1 - 1,
+            ei1 == ei - 1;
 }
 
 proof fn log2(i:u64) -> (e:nat)
@@ -526,17 +791,69 @@ proof fn log2(i:u64) -> (e:nat)
     ensures pow2(e as int) <= i < pow2((e+1) as int),
     decreases i,
 {
-    proof_from_false() // TODO: replace with appropriate return value
+    if i <= 1 {
+        // i = 1 = pow2(0)
+        assert(pow2(0) == 1);
+        assert(pow2(1) == 2);
+        0nat
+    } else {
+        assert(i / 2 >= 1) by (nonlinear_arith) requires i >= 2;
+        let e2 = log2(i / 2);
+        // pow2(e2) <= i/2 < pow2(e2+1)
+        let e = e2 + 1;
+        // pow2(e) = 2 * pow2(e2)
+        pow2_adds(1nat, e2);
+        assert(pow2(1) == 2);
+        let p_e2: nat = pow2(e2 as int);
+        let p_e2p1: nat = pow2((e2 + 1) as int);
+        let p_e: nat = pow2(e as int);
+        let p_ep1: nat = pow2((e + 1) as int);
+        assert(p_e == 2 * p_e2) by (nonlinear_arith)
+            requires pow2(1) * pow2(e2 as int) == pow2(1 + e2 as int), pow2(1) == 2;
+        pow2_adds(1nat, e);
+        assert(p_ep1 == 2 * p_e2p1) by (nonlinear_arith)
+            requires pow2(1) * pow2(e as int) == pow2(1 + e as int), pow2(1) == 2;
+        pow2_adds(1nat, e2);
+        assert(p_e2p1 == 2 * p_e2) by (nonlinear_arith)
+            requires pow2(1) * pow2(e2 as int) == pow2(1 + e2 as int), pow2(1) == 2;
+        // pow2(e) = 2*pow2(e2) <= 2*(i/2) <= i
+        assert(p_e as int <= i as int) by (nonlinear_arith)
+            requires p_e2 as int <= (i / 2) as int, p_e == 2 * p_e2;
+        // i < pow2(e2+1)*2 = pow2(e+1)
+        assert(p_ep1 > i as int) by (nonlinear_arith)
+            requires (i / 2) as int + 1 <= p_e2p1 as int, p_ep1 == 2 * p_e2p1;
+        e
+    }
 }
 
+
+// Non-opaque equivalent of u64_leading_zeros for compute_only evaluation.
+// u64_leading_zeros is #[verifier::opaque] so compute_only can't evaluate it;
+// this function has the same value but is transparent to the evaluator.
+spec fn u64_leading_zeros_for_compute(i: u64) -> int
+    decreases i,
+{
+    if i == 0 { 64 } else { u64_leading_zeros_for_compute(i / 2) - 1 }
+}
+
+proof fn u64_leading_zeros_for_compute_correct(i: u64)
+    ensures u64_leading_zeros_for_compute(i) == u64_leading_zeros(i) as int,
+    decreases i,
+{
+    if i == 0 {
+    } else {
+        u64_leading_zeros_for_compute_correct(i / 2);
+        assert(u64_leading_zeros(i) == u64_leading_zeros(i / 2) - 1);
+    }
+}
 
 /** Put our desired property into a proof-by-compute-friendly form **/
 spec fn property_idx_in_range_has_bin_size(bin_idx: int, wsize:int) -> bool
 {
     valid_bin_idx(bin_idx) &&
     (pfd_lower(bin_idx) <= wsize <= pfd_upper(bin_idx))
-    ==> 
-    smallest_bin_fitting_size(wsize * INTPTR_SIZE) == bin_idx
+    ==>
+    smallest_bin_fitting_size_compute(wsize * INTPTR_SIZE) == bin_idx
 }
 
 spec fn check_idx_in_range_has_bin_size(bin_idx: int, wsize_start:int, wsize_end:int) -> bool
@@ -557,6 +874,9 @@ proof fn result_idx_in_range_has_bin_size(bin_idx: int, wsize_start:int, wsize_e
                  property_idx_in_range_has_bin_size(bin_idx, wsize)),
     decreases wsize_end - wsize_start,
 {
+    if wsize_start < wsize_end {
+        result_idx_in_range_has_bin_size(bin_idx, wsize_start + 1, wsize_end);
+    }
 }
 
 spec fn check2_idx_in_range_has_bin_size(bin_idx_start: int, bin_idx_end: int, wsize_start:int, wsize_end:int) -> bool
@@ -577,35 +897,64 @@ proof fn result2_idx_in_range_has_bin_size(bin_idx_start: int, bin_idx_end: int,
                      property_idx_in_range_has_bin_size(bin_idx, wsize)),
     decreases bin_idx_end - bin_idx_start,
 {
-
+    if bin_idx_start < bin_idx_end {
+        result2_idx_in_range_has_bin_size(bin_idx_start + 1, bin_idx_end, wsize_start, wsize_end);
+        result_idx_in_range_has_bin_size(bin_idx_start, wsize_start, wsize_end);
+    }
 }
 
 pub proof fn idx_in_range_has_bin_size(bin_idx: int, wsize: int)
-    requires 
+    requires
         valid_bin_idx(bin_idx),
         (pfd_lower(bin_idx) <= wsize <= pfd_upper(bin_idx)),
         wsize <= 128,
     ensures
         smallest_bin_fitting_size(wsize * INTPTR_SIZE) == bin_idx
 {
+    // Split by bin_idx and wsize ranges to avoid compute_only recursion depth limit
+    // (large bin_idx values call pfd_lower/upper which recursively calls pow2)
+    assert(check2_idx_in_range_has_bin_size(1, 20, 0, 65)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(1, 20, 65, 129)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(20, 40, 0, 65)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(20, 40, 65, 129)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(40, 60, 0, 65)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(40, 60, 65, 129)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(60, 67, 0, 65)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(60, 67, 65, 129)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(67, 74, 0, 65)) by (compute_only);
+    assert(check2_idx_in_range_has_bin_size(67, 74, 65, 129)) by (compute_only);
+    result2_idx_in_range_has_bin_size(1, 20, 0, 65);
+    result2_idx_in_range_has_bin_size(1, 20, 65, 129);
+    result2_idx_in_range_has_bin_size(20, 40, 0, 65);
+    result2_idx_in_range_has_bin_size(20, 40, 65, 129);
+    result2_idx_in_range_has_bin_size(40, 60, 0, 65);
+    result2_idx_in_range_has_bin_size(40, 60, 65, 129);
+    result2_idx_in_range_has_bin_size(60, 67, 0, 65);
+    result2_idx_in_range_has_bin_size(60, 67, 65, 129);
+    result2_idx_in_range_has_bin_size(67, 74, 0, 65);
+    result2_idx_in_range_has_bin_size(67, 74, 65, 129);
+    smallest_bin_fitting_size_compute_correct_bin(wsize * INTPTR_SIZE);
 }
 
 pub proof fn pfd_lower_le_upper(bin_idx: int)
     requires valid_bin_idx(bin_idx),
     ensures pfd_lower(bin_idx) <= pfd_upper(bin_idx)
 {
+    lemma_bin_sizes_constants();
 }
 
 pub proof fn size_of_bin_bounds(b: int)
     requires valid_bin_idx(b),
     ensures size_of_bin(b) >= INTPTR_SIZE,
 {
+    lemma_bin_sizes_constants();
 }
 
 pub proof fn size_of_bin_bounds_not_huge(b: int)
     requires valid_bin_idx(b), b != BIN_HUGE,
     ensures 8 <= size_of_bin(b) <= 4194304
 {
+    lemma_bin_sizes_constants();
 }
 
 pub proof fn out_of_small_range(bin_idx: int)
@@ -614,18 +963,21 @@ pub proof fn out_of_small_range(bin_idx: int)
     ensures
         pfd_lower(bin_idx) >= PAGES_DIRECT,
 {
+    lemma_bin_sizes_constants();
 }
 
 pub proof fn size_le_8_implies_idx_eq_1(bin_idx: int)
     requires valid_bin_idx(bin_idx), size_of_bin(bin_idx) / 8 <= 1,
     ensures bin_idx == 1,
 {
+    lemma_bin_sizes_constants();
 }
 
 pub proof fn size_gt_8_implies_idx_gt_1(bin_idx: int)
     requires valid_bin_idx(bin_idx), size_of_bin(bin_idx) / 8 > 1,
     ensures bin_idx > 1,
 {
+    lemma_bin_sizes_constants();
 }
 
 
@@ -639,11 +991,32 @@ pub open spec fn pow2(i: int) -> nat
     }
 }
 
-/** Put our desired property into a proof-by-compute-friendly form **/
+// Check only valid_bin_idx (no size_of_bin, avoids pow2 recursion depth issue)
+spec fn property_valid_bin_idx_compute(size: int) -> bool
+{
+    valid_bin_idx(smallest_bin_fitting_size_compute(size))
+}
+
+spec fn check_valid_bin_idx_compute(size_start: int, size_end: int) -> bool
+    decreases size_end - size_start,
+{
+    if size_start >= size_end { true }
+    else { property_valid_bin_idx_compute(size_start) && check_valid_bin_idx_compute(size_start + 1, size_end) }
+}
+
+proof fn result_valid_bin_idx_compute(size_start: int, size_end: int)
+    ensures check_valid_bin_idx_compute(size_start, size_end) ==>
+        forall|size| size_start <= size < size_end ==> property_valid_bin_idx_compute(size),
+    decreases size_end - size_start,
+{
+    if size_start < size_end { result_valid_bin_idx_compute(size_start + 1, size_end); }
+}
+
+// Keep old spec fn for backward compat (now unused in main proof)
 spec fn property_bounds_for_smallest_bitting_size(size:int) -> bool
 {
-    valid_bin_idx(smallest_bin_fitting_size(size)) &&
-    size_of_bin(smallest_bin_fitting_size(size)) >= size
+    valid_bin_idx(smallest_bin_fitting_size_compute(size)) &&
+    size_of_bin(smallest_bin_fitting_size_compute(size)) >= size
 }
 
 spec fn check_bounds_for_smallest_bitting_size(size_start:int, size_end:int) -> bool
@@ -664,6 +1037,9 @@ proof fn result_bounds_for_smallest_bitting_size(size_start:int, size_end:int)
                  property_bounds_for_smallest_bitting_size(size)),
     decreases size_end - size_start,
 {
+    if size_start < size_end {
+        result_bounds_for_smallest_bitting_size(size_start + 1, size_end);
+    }
 }
 
 pub proof fn bounds_for_smallest_bin_fitting_size(size: int)
@@ -672,12 +1048,35 @@ pub proof fn bounds_for_smallest_bin_fitting_size(size: int)
         valid_bin_idx(smallest_bin_fitting_size(size)),
         size_of_bin(smallest_bin_fitting_size(size)) >= size,
 {
+    // Step 1: Prove valid_bin_idx using a check that avoids size_of_bin (no pow2 recursion)
+    assert(check_valid_bin_idx_compute(0, 130)) by (compute_only);
+    assert(check_valid_bin_idx_compute(130, 260)) by (compute_only);
+    assert(check_valid_bin_idx_compute(260, 390)) by (compute_only);
+    assert(check_valid_bin_idx_compute(390, 520)) by (compute_only);
+    assert(check_valid_bin_idx_compute(520, 650)) by (compute_only);
+    assert(check_valid_bin_idx_compute(650, 780)) by (compute_only);
+    assert(check_valid_bin_idx_compute(780, 910)) by (compute_only);
+    assert(check_valid_bin_idx_compute(910, 1025)) by (compute_only);
+    result_valid_bin_idx_compute(0, 130);
+    result_valid_bin_idx_compute(130, 260);
+    result_valid_bin_idx_compute(260, 390);
+    result_valid_bin_idx_compute(390, 520);
+    result_valid_bin_idx_compute(520, 650);
+    result_valid_bin_idx_compute(650, 780);
+    result_valid_bin_idx_compute(780, 910);
+    result_valid_bin_idx_compute(910, 1025);
+    smallest_bin_fitting_size_compute_correct_bin(size);
+    // Step 2: Prove size_of_bin >= size using bin_size_result (avoids compute_only with pow2)
+    let size_u: usize = size as usize;
+    assert(size_u as int == size) by (nonlinear_arith) requires 0 <= size <= 1024;
+    assert(size_u <= 131072) by (nonlinear_arith) requires size <= 128 * 8;
+    bin_size_result(size_u);
 }
 
 /** Put our desired property into a proof-by-compute-friendly form **/
 spec fn property_smallest_bin_fitting_size_size_of_bin(bin_idx:int) -> bool
 {
-    smallest_bin_fitting_size(size_of_bin(bin_idx) as int) == bin_idx
+    smallest_bin_fitting_size_compute(size_of_bin(bin_idx) as int) == bin_idx
 }
 
 spec fn check_smallest_bin_fitting_size_size_of_bin(bin_idx_start:int, bin_idx_end:int) -> bool
@@ -698,13 +1097,37 @@ proof fn result_smallest_bin_fitting_size_size_of_bin(bin_idx_start:int, bin_idx
                  property_smallest_bin_fitting_size_size_of_bin(bin_idx)),
     decreases bin_idx_end - bin_idx_start,
 {
-
+    if bin_idx_start < bin_idx_end {
+        result_smallest_bin_fitting_size_size_of_bin(bin_idx_start + 1, bin_idx_end);
+    }
 }
 
 pub proof fn smallest_bin_fitting_size_size_of_bin(bin_idx: int)
     requires valid_bin_idx(bin_idx),
     ensures smallest_bin_fitting_size(size_of_bin(bin_idx) as int) == bin_idx,
 {
+    // Split into small chunks to avoid compute_only recursion depth limit (pow2 depth)
+    assert(check_smallest_bin_fitting_size_size_of_bin(1, 10)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(10, 19)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(19, 28)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(28, 37)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(37, 46)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(46, 55)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(55, 64)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(64, 68)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(68, 73)) by (compute_only);
+    assert(check_smallest_bin_fitting_size_size_of_bin(73, 74)) by (compute_only);
+    result_smallest_bin_fitting_size_size_of_bin(1, 10);
+    result_smallest_bin_fitting_size_size_of_bin(10, 19);
+    result_smallest_bin_fitting_size_size_of_bin(19, 28);
+    result_smallest_bin_fitting_size_size_of_bin(28, 37);
+    result_smallest_bin_fitting_size_size_of_bin(37, 46);
+    result_smallest_bin_fitting_size_size_of_bin(46, 55);
+    result_smallest_bin_fitting_size_size_of_bin(55, 64);
+    result_smallest_bin_fitting_size_size_of_bin(64, 68);
+    result_smallest_bin_fitting_size_size_of_bin(68, 73);
+    result_smallest_bin_fitting_size_size_of_bin(73, 74);
+    smallest_bin_fitting_size_compute_correct_bin(size_of_bin(bin_idx) as int);
 }
 
 proof fn leading_zeros_monotonic(w:u64)
@@ -712,12 +1135,68 @@ proof fn leading_zeros_monotonic(w:u64)
        forall |x:u64| x < w ==> u64_leading_zeros(w) <= u64_leading_zeros(x),
     decreases w,
 {
+    assert forall |x:u64| x < w implies u64_leading_zeros(w) <= u64_leading_zeros(x) by {
+        // If x < w, the highest bit of w is >= highest bit of x,
+        // so w has fewer leading zeros
+        if w == 0 {
+            // x < 0 is impossible for u64
+        } else {
+            // u64_leading_zeros(w) = u64_leading_zeros(w/2) - 1
+            // u64_leading_zeros(x) = u64_leading_zeros(x/2) - 1 (if x != 0)
+            //                       = 64 (if x == 0)
+            // By induction on w (decreases)
+            if x == 0 {
+                assert(u64_leading_zeros(0u64) == 64);
+                assert(u64_leading_zeros(w) <= 64);
+            } else {
+                // x < w, x/2 < w (since x < w)
+                // Actually x/2 <= (w-1)/2 < w
+                leading_zeros_monotonic(w / 2);
+                // forall y < w/2: u64_leading_zeros(w/2) <= u64_leading_zeros(y)
+                // x/2 <= (w-1)/2 = (w/2) if w even, = (w-1)/2 < w/2 if w odd
+                // So x/2 < w/2 when x < w
+                assert(x / 2 < w / 2 || (x / 2 == w / 2 && x != w)) by (nonlinear_arith)
+                    requires x < w;
+                // Hmm this is getting complex. Let me use a simpler argument.
+                // u64_leading_zeros(w) = u64_leading_zeros(w/2) - 1
+                // u64_leading_zeros(x) = u64_leading_zeros(x/2) - 1 (x != 0)
+                // x/2 <= (w-1)/2 < w/2 + 1...
+                // If x/2 < w/2: by induction u64_leading_zeros(w/2) <= u64_leading_zeros(x/2)
+                //   so u64_leading_zeros(w) = u64_leading_zeros(w/2) - 1 <= u64_leading_zeros(x/2) - 1 = u64_leading_zeros(x)
+                // If x/2 = w/2: then x = 2*(w/2) or x = 2*(w/2)+1 and w >= 2*(w/2)+1
+                //   If x = w/2 * 2: then u64_leading_zeros(x) = u64_leading_zeros(x/2) - 1 = u64_leading_zeros(w/2) - 1 = u64_leading_zeros(w)
+                //   If x = w/2 * 2 + 1: u64_leading_zeros(x) = u64_leading_zeros(x/2) - 1 = u64_leading_zeros(w/2) - 1 = u64_leading_zeros(w)
+                assert(u64_leading_zeros(w) <= u64_leading_zeros(x)) by {
+                    if x / 2 < w / 2 {
+                        assert(u64_leading_zeros(w / 2) <= u64_leading_zeros(x / 2));
+                        assert(u64_leading_zeros(w) == u64_leading_zeros(w / 2) - 1);
+                        assert(u64_leading_zeros(x) == u64_leading_zeros(x / 2) - 1);
+                    } else {
+                        // x/2 == w/2, so x and w agree on all but the last bit
+                        // Both have the same leading zeros
+                        assert(x / 2 == w / 2) by (nonlinear_arith) requires x < w, x / 2 >= w / 2;
+                        assert(u64_leading_zeros(x) == u64_leading_zeros(x / 2) - 1);
+                        assert(u64_leading_zeros(w) == u64_leading_zeros(w / 2) - 1);
+                        assert(u64_leading_zeros(w / 2) == u64_leading_zeros(x / 2));
+                    }
+                };
+            }
+        }
+    };
 }
 
 proof fn leading_zeros_between(lo:u64, mid:u64, hi:u64)
     requires lo <= mid < hi,
     ensures u64_leading_zeros(lo) >= u64_leading_zeros(mid) >= u64_leading_zeros(hi),
 {
+    leading_zeros_monotonic(hi);
+    assert(u64_leading_zeros(hi) <= u64_leading_zeros(mid));
+    if lo == mid {
+        // trivial
+    } else {
+        leading_zeros_monotonic(mid);
+        assert(u64_leading_zeros(mid) <= u64_leading_zeros(lo));
+    }
 }
 
 /** Put our desired property into a proof-by-compute-friendly form **/
@@ -748,6 +1227,9 @@ proof fn result_bin(size_start:int, size_end:int)
                  #[trigger] id(size) && property_bin(size)),
     decreases size_end - size_start + 8,
 {
+    if size_start < size_end {
+        result_bin(size_start + 8, size_end);
+    }
 }
 
 pub proof fn bin_size_result(size: usize)
@@ -758,13 +1240,76 @@ pub proof fn bin_size_result(size: usize)
         131072 >= size_of_bin(smallest_bin_fitting_size(size as int) as int) >= size,
     decreases 8 - ((size + 7) % 8)
 {
-
+    // Round up to nearest multiple of 8
+    let si: int = size as int;
+    let size8i: int = ((si + 7) / 8) * 8;
+    assert(size8i % 8 == 0) by (nonlinear_arith);
+    assert(size8i <= 131072) by (nonlinear_arith);
+    assert(size8i >= si) by (nonlinear_arith);
+    assert(smallest_bin_fitting_size(si) == smallest_bin_fitting_size(size8i)) by (compute_only);
+    // Now use bin_size_result_mul8 for the rounded-up size
+    let size8: usize = size8i as usize;
+    assert(size8 as int == size8i) by (nonlinear_arith);
+    bin_size_result_mul8(size8);
 }
 
-// The "proof" is below is broken into chunks,
-// so (a) we don't exceed the interpreter's stack limit,
-// and (b) because the interpreter time seems to scale
-// non-linearly with recursion depth
+// Helper for algebraic proof: size_of_bin(formula_bin) >= 8*wsize when wsize > 8
+proof fn size_of_bin_ge_formula(si: int, wsize: int, w: u64, e: nat, shifted_int: int, bin_idx: int)
+    requires
+        si == 8 * wsize,
+        shifted_int == w as int / pow2(e as int - 2) as int,
+        4 <= shifted_int,
+        shifted_int < 8,
+        bin_idx == (e as int * 4 + (shifted_int & 3)) - 3,
+        1 <= bin_idx,
+        bin_idx <= 73,
+        wsize == w as int + 1,
+        2 <= e as int,
+    ensures
+        size_of_bin(bin_idx) >= si,
+{
+    let e_int: int = e as int;
+    let pow_e2: nat = pow2(e_int - 2);
+    let p: int = pow_e2 as int;
+    pow2_positive(e_int - 2);
+    assert(p > 0);
+    // w = shifted * pow2(e-2) + r, 0 <= r < pow2(e-2)
+    let wi: int = w as int;
+    let r: int = wi % p;
+    assert(wi == shifted_int * p + r) by (nonlinear_arith)
+        requires wi / p == shifted_int, p > 0;
+    assert(0 <= r);
+    assert(r < p);
+    // w + 1 <= (shifted + 1) * pow2(e-2)
+    assert(wi + 1 <= (shifted_int + 1) * p) by (nonlinear_arith)
+        requires wi == shifted_int * p + r, r < p;
+    // inner = shifted & 3 = shifted - 4 (since 4 <= shifted <= 7)
+    let inner: int = shifted_int & 3;
+    assert(inner == shifted_int - 4) by (nonlinear_arith)
+        requires 4 <= shifted_int, shifted_int < 8;
+    // (inner + 5) = shifted + 1
+    // (inner + 5) * pow2(e-2) >= wsize = w+1
+    assert((inner + 5) * p >= wsize) by (nonlinear_arith)
+        requires inner == shifted_int - 4,
+            wi + 1 <= (shifted_int + 1) * p,
+            wsize == wi + 1;
+    // size_of_bin formula: group = e-3, inner = inner
+    assert((bin_idx - 9) / 4 == e_int - 3) by (nonlinear_arith)
+        requires bin_idx == e_int * 4 + inner - 3, 0 <= inner, inner <= 3, 2 <= e_int, e_int <= 63;
+    assert((bin_idx - 9) % 4 == inner) by (nonlinear_arith)
+        requires bin_idx == e_int * 4 + inner - 3, 0 <= inner, inner <= 3, 2 <= e_int, e_int <= 63;
+    assert(pow2((bin_idx - 9) / 4 + 1) == pow_e2) by {
+        assert((bin_idx - 9) / 4 + 1 == e_int - 2) by (nonlinear_arith)
+            requires (bin_idx - 9) / 4 == e_int - 3;
+    };
+    reveal(size_of_bin);
+    assert(usize::BITS / 8 == 8) by (nonlinear_arith);
+    assert(size_of_bin(bin_idx) == 8 * (inner + 5) * p);
+    assert(size_of_bin(bin_idx) >= si) by (nonlinear_arith)
+        requires size_of_bin(bin_idx) == 8 * (inner + 5) * p,
+            (inner + 5) * p >= wsize, si == 8 * wsize;
+}
+
 pub proof fn bin_size_result_mul8(size: usize)
     requires
         size % 8 == 0,
@@ -773,6 +1318,100 @@ pub proof fn bin_size_result_mul8(size: usize)
     ensures
         131072 >= size_of_bin(smallest_bin_fitting_size(size as int) as int) >= size,
 {
+    let si: int = size as int;
+    let wsize: int = si / 8;
+    assert(si == 8 * wsize) by (nonlinear_arith);
+    assert(0 <= wsize <= 16384) by (nonlinear_arith);
+    let b: int = smallest_bin_fitting_size(si);
+    lemma_bin_sizes_constants();
+    smallest_bin_fitting_size_compute_correct_bin(si);
+    // b == smallest_bin_fitting_size_compute(si)
+
+    if wsize <= 1 {
+        assert(b == 1);
+        assert(size_of_bin(1 as int) == 8);
+        assert(si <= 8) by (nonlinear_arith) requires si == 8 * wsize, wsize <= 1;
+    } else if wsize <= 8 {
+        assert(b == wsize);
+        assert(size_of_bin(b) == 8 * wsize) by (nonlinear_arith)
+            requires b == wsize, size_of_bin(b) == 8 * b as int;
+        assert(si == 8 * wsize);
+    } else {
+        // Formula case: 8 < wsize <= 16384, so w = wsize-1 >= 8
+        let w: u64 = (wsize - 1) as u64;
+        let wi: int = w as int;
+        // Get e = log2(w)
+        let e: nat = log2(w);
+        // u64_leading_zeros(w) = 63 - e
+        leading_zeros_between_powers_of_2(w, e);
+        assert(u64_leading_zeros(w) == 63 - e as int);
+        // shifted = w >> (e-2) = w / pow2(e-2)
+        assert(2 <= e as int) by {
+            assert(pow2(2) == 4) by (compute_only);
+            assert(w as int >= 8) by (nonlinear_arith);
+            pow2_positive(e as int);
+            assert(e as int >= 2) by (nonlinear_arith) requires pow2(e as int) <= w as int, w as int >= 8, pow2(2) == 4, pow2(e as int) >= 1;
+        };
+        assert(e as int < 64) by {
+            pow2_properties();
+        };
+        shift_is_div(w, (e as u64 - 2));
+        let shifted_int: int = w as int / pow2(e as int - 2) as int;
+        assert(w >> (e as u64 - 2) == shifted_int as u64) by (nonlinear_arith)
+            requires w as nat / pow2(e as int - 2) as nat == shifted_int as nat, shifted_int >= 0;
+        // 4 <= shifted_int < 8
+        assert(4 <= shifted_int) by {
+            pow2_positive(e as int);
+            pow2_subtracts((e as int - 2) as nat, e as nat);
+            assert(pow2(e as int) / pow2(e as int - 2) == pow2(2)) by {
+                assert(e as int - (e as int - 2) == 2);
+            };
+            assert(pow2(2) == 4) by (compute_only);
+            assert(shifted_int >= 4) by (nonlinear_arith)
+                requires pow2(e as int) <= w as int,
+                    pow2(e as int) / pow2(e as int - 2) as int == 4,
+                    shifted_int == w as int / pow2(e as int - 2) as int,
+                    pow2(e as int - 2) as int > 0;
+        };
+        assert(shifted_int < 8) by {
+            pow2_positive(e as int);
+            pow2_subtracts((e as int - 2) as nat, (e as int + 1) as nat);
+            assert(pow2(e as int + 1) / pow2(e as int - 2) == pow2(3));
+            assert(pow2(3) == 8) by (compute_only);
+            assert(shifted_int < 8) by (nonlinear_arith)
+                requires w as int < pow2(e as int + 1),
+                    pow2(e as int + 1) / pow2(e as int - 2) as int == 8,
+                    shifted_int == w as int / pow2(e as int - 2) as int,
+                    pow2(e as int - 2) as int > 0;
+        };
+        // bin_idx from formula
+        let lz: int = 63 - e as int;
+        let b_inner: int = (shifted_int & 3);
+        let bin_idx_formula: int = (e as int * 4 + b_inner) - 3;
+        // b == bin_idx_formula (from smallest_bin_fitting_size definition)
+        assert(b == bin_idx_formula) by {
+            // u64_leading_zeros_for_compute(w) = 63 - e
+            u64_leading_zeros_for_compute_correct(w);
+            // smallest_bin_fitting_size_compute(si) uses u64_leading_zeros_for_compute
+            // and gives the same formula
+        };
+        // valid bin_idx range
+        assert(1 <= bin_idx_formula <= 73) by (nonlinear_arith)
+            requires 2 <= e as int <= 63, 0 <= b_inner <= 3,
+                bin_idx_formula == e as int * 4 + b_inner - 3;
+        size_of_bin_ge_formula(si, wsize, w, e, shifted_int, bin_idx_formula);
+        assert(b == bin_idx_formula);
+    }
+    // Upper bound: size_of_bin(b) <= 131072
+    assert(size_of_bin(b) <= 131072) by {
+        // b <= 52 since size <= 131072 and size_of_bin is increasing
+        // Use lemma_bin_sizes_constants or a direct bound
+        if b <= 73 {
+            // All valid bins b have size_of_bin(b) <= size_of_bin(73)
+            // size_of_bin(52) = 131072, and for valid bins, size grows monotonically
+            assert(size_of_bin(b) <= 131072) by { lemma_bin_sizes_constants(); }
+        }
+    };
 }
 
 // Used to compute a bin for a given size
@@ -891,6 +1530,31 @@ pub closed spec fn size_of_sbin(sbin_idx: int) -> nat
     }
 }
 
+// Compute-friendly version of smallest_sbin_fitting_size that uses
+// u64_leading_zeros_for_compute instead of the opaque u64_leading_zeros.
+spec fn smallest_sbin_fitting_size_compute(i: int) -> int
+{
+    if i <= 8 {
+        i
+    } else {
+        let w = (i - 1) as u64;
+        let lz = u64_leading_zeros_for_compute(w);
+        let b = (63 - lz) as u8;
+        let sbin_idx = ((b << 2u8) as u64 | ((w >> (b as u64 - 2) as u64) & 0x03)) - 4;
+        sbin_idx
+    }
+}
+
+proof fn smallest_sbin_fitting_size_compute_correct(i: int)
+    ensures smallest_sbin_fitting_size_compute(i) == smallest_sbin_fitting_size(i),
+{
+    if i > 8 {
+        let w = (i - 1) as u64;
+        u64_leading_zeros_for_compute_correct(w);
+        assert(usize::BITS == 64u32) by (compute_only);
+    }
+}
+
 pub open spec fn smallest_sbin_fitting_size(i: int) -> int
 {
     if i <= 8 {
@@ -908,7 +1572,7 @@ pub open spec fn smallest_sbin_fitting_size(i: int) -> int
 /** Put our desired property into a proof-by-compute-friendly form **/
 spec fn property_sbin_idx_smallest_sbin_fitting_size(size:int) -> bool
 {
-    valid_sbin_idx(smallest_sbin_fitting_size(size))
+    valid_sbin_idx(smallest_sbin_fitting_size_compute(size))
 }
 
 spec fn check_sbin_idx_smallest_sbin_fitting_size(size_start:int, size_end:int) -> bool
@@ -929,22 +1593,36 @@ proof fn result_sbin_idx_smallest_sbin_fitting_size(size_start:int, size_end:int
                  property_sbin_idx_smallest_sbin_fitting_size(size)),
     decreases size_end - size_start,
 {
+    if size_start < size_end {
+        result_sbin_idx_smallest_sbin_fitting_size(size_start + 1, size_end);
+    }
 }
 
 pub proof fn valid_sbin_idx_smallest_sbin_fitting_size(i: int)
     requires 0 <= i <= SLICES_PER_SEGMENT
     ensures valid_sbin_idx(smallest_sbin_fitting_size(i)),
 {
+    assert(SLICES_PER_SEGMENT == 512) by (compute_only);
+    // Break into chunks to avoid compute_only recursion depth limits
+    assert(check_sbin_idx_smallest_sbin_fitting_size(0, 130)) by (compute_only);
+    assert(check_sbin_idx_smallest_sbin_fitting_size(130, 260)) by (compute_only);
+    assert(check_sbin_idx_smallest_sbin_fitting_size(260, 390)) by (compute_only);
+    assert(check_sbin_idx_smallest_sbin_fitting_size(390, 513)) by (compute_only);
+    result_sbin_idx_smallest_sbin_fitting_size(0, 130);
+    result_sbin_idx_smallest_sbin_fitting_size(130, 260);
+    result_sbin_idx_smallest_sbin_fitting_size(260, 390);
+    result_sbin_idx_smallest_sbin_fitting_size(390, 513);
+    smallest_sbin_fitting_size_compute_correct(i);
 }
 
 /** Put our desired property into a proof-by-compute-friendly form **/
 spec fn property_sbin_bounds(size:int) -> bool
 {
-    let lz = u64_leading_zeros(size as u64);
+    let lz = u64_leading_zeros_for_compute(size as u64);
     let b = (63 - lz) as u8;
     // Satisfy various type requirements
     (b  >= 2) &&
-    (((b << 2u8) as u64 | ((size as u64 >> (b as u64 - 2) as u64) & 0x03)) >= 4) 
+    (((b << 2u8) as u64 | ((size as u64 >> (b as u64 - 2) as u64) & 0x03)) >= 4)
 }
 
 spec fn check_sbin_bounds(size_start:int, size_end:int) -> bool
@@ -965,12 +1643,15 @@ proof fn result_sbin_bounds(size_start:int, size_end:int)
                  property_sbin_bounds(size)),
     decreases size_end - size_start,
 {
+    if size_start < size_end {
+        result_sbin_bounds(size_start + 1, size_end);
+    }
 }
 
 /** Put our desired property into a proof-by-compute-friendly form **/
 spec fn property_sbin(slice_count:int) -> bool
 {
-    let sbin_idx = smallest_sbin_fitting_size(slice_count as int);
+    let sbin_idx = smallest_sbin_fitting_size_compute(slice_count as int);
     valid_sbin_idx(sbin_idx as int) &&
     size_of_sbin(sbin_idx as int) >= slice_count
 }
@@ -993,6 +1674,9 @@ proof fn result_sbin(size_start:int, size_end:int)
                  property_sbin(size)),
     decreases size_end - size_start,
 {
+    if size_start < size_end {
+        result_sbin(size_start + 1, size_end);
+    }
 }
 
 pub fn slice_bin(slice_count: usize) -> (sbin_idx: usize)
@@ -1012,17 +1696,32 @@ pub fn slice_bin(slice_count: usize) -> (sbin_idx: usize)
         assert(8 <= w <= 511);
         let lz = w.leading_zeros();
         proof {
-            assert(check_sbin_bounds(8, 512)) by (compute_only);
-            result_sbin_bounds(8, 512);
+            // Break into chunks to avoid compute_only recursion depth limits
+            assert(check_sbin_bounds(8, 130)) by (compute_only);
+            assert(check_sbin_bounds(130, 260)) by (compute_only);
+            assert(check_sbin_bounds(260, 390)) by (compute_only);
+            assert(check_sbin_bounds(390, 512)) by (compute_only);
+            result_sbin_bounds(8, 130);
+            result_sbin_bounds(130, 260);
+            result_sbin_bounds(260, 390);
+            result_sbin_bounds(390, 512);
             assert(property_sbin_bounds(w as int));
+            u64_leading_zeros_for_compute_correct(w);
         }
         let b = (usize::BITS - 1 - lz) as u8;
         let sbin_idx = ((b << 2u8) as u64 | ((w >> (b as u64 - 2)) & 0x03)) - 4;
         assert(sbin_idx == smallest_sbin_fitting_size(slice_count as int));
         proof {
-            assert(check_sbin(9, 513)) by (compute_only);
-            result_sbin(9, 513);
+            assert(check_sbin(9, 130)) by (compute_only);
+            assert(check_sbin(130, 260)) by (compute_only);
+            assert(check_sbin(260, 390)) by (compute_only);
+            assert(check_sbin(390, 513)) by (compute_only);
+            result_sbin(9, 130);
+            result_sbin(130, 260);
+            result_sbin(260, 390);
+            result_sbin(390, 513);
             assert(property_sbin(slice_count as int));
+            smallest_sbin_fitting_size_compute_correct(slice_count as int);
         }
         sbin_idx as usize
     }
